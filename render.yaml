@@ -1,0 +1,23 @@
+services:
+  # AgentMesh MCP Adapter (Streamable HTTP)
+  - type: web
+    name: agentmesh-mcp
+    env: python
+    buildCommand: "pip install -e ."
+    startCommand: "python -m agentmesh_mcp.server"
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: AGENTMESH_MCP_TRANSPORT
+        value: streamable-http
+      - key: AGENTMESH_MCP_HOST
+        value: 0.0.0.0
+      - key: AGENTMESH_MCP_PORT
+        value: 10000
+      - key: AGENTLEDGE_API_BASE_URL
+        value: https://agentsledge-backend.onrender.com
+      - key: AGENTLEDGE_OAUTH_ISSUER
+        value: https://agentsledge-backend.onrender.com
+      - key: AGENTMESH_MCP_PUBLIC_URL
+        value: https://agentmesh-mcp.onrender.com/mcp
