@@ -231,6 +231,53 @@ def test_all_write_tools_require_write_scope_and_call_existing_api_methods(monke
     assert read_only_client.closed is False
 
 
+def test_gemini_summarization_tool_uses_live_listing_and_exact_approval(monkeypatch):
+    listing = {"id": 17, "name": "Meeting Summarizer", "execution_available": True}
+    client = FakeMarketplaceClient([listing])
+    note_text = "Decided to launch Tuesday. Alex sends the invite."
+    pending = _run_as_user(
+        monkeypatch, server.summarize_meeting_notes, client,
+        note_text, 100, "summary-run-1", scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert pending["approval_required"] is True
+    assert pending["approval"]["payload"] == {
+        "agent_id": 17, "negotiation_id": 100,
+        "input_data": {"input_text": note_text}, "idempotency_key": "summary-run-1",
+    }
+    assert client.write_calls == []
+    assert client.closed is True
+
+    client = FakeMarketplaceClient([listing])
+    executed = _run_as_user(
+        monkeypatch, server.summarize_meeting_notes, client,
+        note_text, 100, "summary-run-1", "approved-on-site",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert executed["ok"] is True
+    assert executed["service"]["id"] == 17
+    assert executed["execution"]["execution_mode"] == "live"
+    assert client.write_calls == [("invoke_service", "approved-on-site")]
+    assert client.closed is True
+
+
+def test_gemini_summarization_tool_requires_write_scope_and_executable_listing(monkeypatch):
+    read_only = FakeMarketplaceClient([{"id": 17, "name": "Meeting Summarizer", "execution_available": True}])
+    denied = _run_as_user(
+        monkeypatch, server.summarize_meeting_notes, read_only, "Notes", 100, "summary-run-1",
+        scopes=["marketplace:read"],
+    )
+    assert denied["ok"] is False and "marketplace:write" in denied["error"]
+    assert read_only.closed is False
+
+    unavailable = FakeMarketplaceClient([{"id": 17, "name": "Meeting Summarizer", "execution_available": False}])
+    rejected = _run_as_user(
+        monkeypatch, server.summarize_meeting_notes, unavailable, "Notes", 100, "summary-run-1",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert rejected["ok"] is False and "exactly one configured" in rejected["error"]
+    assert unavailable.write_calls == []
+
+
 def test_remote_resource_metadata_advertises_read_and_write_scopes():
     from starlette.testclient import TestClient
 
@@ -246,7 +293,8 @@ def test_remote_resource_metadata_advertises_read_and_write_scopes():
 
 def test_write_tools_describe_user_approval_requirements():
     for tool in (server.start_negotiation, server.submit_negotiation_offer, server.accept_negotiation,
-                 server.reject_negotiation, server.invoke_service_agent, server.submit_agent_review):
+                 server.reject_negotiation, server.invoke_service_agent, server.summarize_meeting_notes,
+                 server.submit_agent_review):
         assert "approval_id" in tool.__doc__
         assert "approval" in tool.__doc__.lower()
 
@@ -259,8 +307,10 @@ def test_tool_security_metadata_requires_read_plus_write_for_mutations():
         return {"tools": [
             {"name": "discover_services"},
             {"name": "accept_negotiation"},
+            {"name": "summarize_meeting_notes"},
         ]}
 
     result = asyncio.run(server.ChatGPTToolSecurityMiddleware()(Context(), call_next))
     assert result["tools"][0]["securitySchemes"][0]["scopes"] == ["marketplace:read"]
     assert result["tools"][1]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
+    assert result["tools"][2]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
