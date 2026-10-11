@@ -35,7 +35,8 @@ WRITE_SCOPE = "marketplace:write"
 SUPPORTED_SCOPES = {READ_SCOPE, WRITE_SCOPE}
 WRITE_TOOLS = {
     "start_negotiation", "submit_negotiation_offer", "accept_negotiation",
-    "reject_negotiation", "invoke_service_agent", "execute_marketplace_service", "summarize_meeting_notes", "submit_agent_review",
+    "reject_negotiation", "invoke_service_agent", "execute_marketplace_service",
+    "summarize_meeting_notes", "submit_agent_review",
 }
 
 

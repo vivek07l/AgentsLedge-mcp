@@ -294,7 +294,8 @@ def test_remote_resource_metadata_advertises_read_and_write_scopes():
 
 def test_write_tools_describe_user_approval_requirements():
     for tool in (server.start_negotiation, server.submit_negotiation_offer, server.accept_negotiation,
-                 server.reject_negotiation, server.invoke_service_agent, server.execute_marketplace_service, server.summarize_meeting_notes,
+                 server.reject_negotiation, server.invoke_service_agent,
+                 server.execute_marketplace_service, server.summarize_meeting_notes,
                  server.submit_agent_review):
         assert "approval_id" in tool.__doc__
         assert "approval" in tool.__doc__.lower()
