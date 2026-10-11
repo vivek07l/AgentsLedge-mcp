@@ -1,7 +1,7 @@
-"""Small HTTP client for the existing AgentLedge REST API.
+"""HTTP client for the existing AgentsLedge REST API.
 
-This adapter deliberately calls only public GET endpoints in the first phase.
-It does not read or write the marketplace database directly.
+The client forwards only the authenticated user's OAuth bearer token and calls
+existing API routes. It does not access the marketplace database directly.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _normalise_base_url(value: str | None) -> str:
 
 
 class AgentLedgeClient:
-    """HTTP client that calls only documented public read endpoints."""
+    """HTTP client that delegates policy and state changes to the backend."""
 
     def __init__(
         self,
@@ -57,9 +57,34 @@ class AgentLedgeClient:
 
     def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET a JSON endpoint and return its response without rewriting fields."""
+        return self._request_json("GET", path, params=params)
+
+    @staticmethod
+    def _error_for_status(status_code: int, method: str, path: str) -> str:
+        messages = {
+            401: "Authorization is missing or expired. Reconnect your AgentsLedge account.",
+            402: "The account does not have enough marketplace tokens for this service.",
+            403: "This action is not authorized for this account or OAuth permission set.",
+            404: "The requested service or user-owned record was not found.",
+            409: "The requested state transition is not currently allowed, or this idempotency key was already used.",
+            422: "The request failed marketplace validation. Check the price, budget, rating, or required input fields.",
+            502: "The service provider could not complete execution. No successful result was recorded.",
+        }
+        detail = messages.get(status_code, "The AgentsLedge API could not complete this request.")
+        return f"{detail} (HTTP {status_code} for {method} /{path})"
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         safe_path = path.lstrip("/")
         try:
-            response = self._client.get(safe_path, params=params)
+            response = self._client.request(method, safe_path, params=params, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             raise AgentLedgeAPIError("AgentLedge API timed out") from exc
         except httpx.HTTPError as exc:
@@ -70,10 +95,8 @@ class AgentLedgeClient:
                 f"AgentLedge returned an unexpected redirect (HTTP {response.status_code})"
             )
         if response.status_code >= 400:
-            # Do not return arbitrary backend response bodies that could contain internals.
-            raise AgentLedgeAPIError(
-                f"AgentLedge API returned HTTP {response.status_code} for GET /{safe_path}"
-            )
+            # Do not relay arbitrary response bodies or internal exception data.
+            raise AgentLedgeAPIError(self._error_for_status(response.status_code, method, safe_path))
         try:
             return response.json()
         except ValueError as exc:
@@ -105,3 +128,51 @@ class AgentLedgeClient:
 
     def get_agent_reputation(self, agent_id: str | int) -> Any:
         return self.get_json(f"/agents/{agent_id}/reputation")
+
+    def get_agent_reviews(self, agent_id: int) -> Any:
+        return self.get_json(f"/agents/{agent_id}/reviews")
+
+    def get_negotiation_status(self, negotiation_id: int) -> Any:
+        return self.get_json(f"/negotiations/{negotiation_id}")
+
+    def get_invocation_result(self, invocation_id: int) -> Any:
+        return self.get_json(f"/users/me/invocations/{invocation_id}")
+
+    def request_action_approval(self, action: str, payload: dict[str, Any]) -> Any:
+        """Queue an exact write request for approval in the signed-in website UI."""
+        return self._request_json("POST", "/mcp/action-approvals", payload={"action": action, "payload": payload})
+
+    def start_negotiation(self, agent_id: int, buyer_budget: float, initial_offer: float, approval_id: str | None = None) -> Any:
+        return self._request_json("POST", "/negotiations", payload={
+            "agent_id": agent_id, "buyer_budget": buyer_budget, "initial_offer": initial_offer,
+        }, headers={"X-User-Approval": approval_id} if approval_id else None)
+
+    def submit_negotiation_offer(self, negotiation_id: int, amount: float, approval_id: str | None = None) -> Any:
+        return self._request_json("POST", f"/negotiations/{negotiation_id}/offers", payload={"amount": amount},
+                                  headers={"X-User-Approval": approval_id} if approval_id else None)
+
+    def accept_negotiation(self, negotiation_id: int, approval_id: str | None = None) -> Any:
+        return self._request_json("POST", f"/negotiations/{negotiation_id}/accept", payload={},
+                                  headers={"X-User-Approval": approval_id} if approval_id else None)
+
+    def reject_negotiation(self, negotiation_id: int, approval_id: str | None = None) -> Any:
+        return self._request_json("POST", f"/negotiations/{negotiation_id}/reject", payload={},
+                                  headers={"X-User-Approval": approval_id} if approval_id else None)
+
+    def invoke_service_agent(
+        self, agent_id: int, input_data: dict[str, Any], negotiation_id: int, idempotency_key: str,
+        approval_id: str | None = None,
+    ) -> Any:
+        return self._request_json(
+            "POST", f"/agents/invoke/{agent_id}",
+            payload={**input_data, "negotiation_id": negotiation_id},
+            headers={"Idempotency-Key": idempotency_key, **({"X-User-Approval": approval_id} if approval_id else {})},
+        )
+
+    def submit_agent_review(
+        self, agent_id: int, invocation_id: int, rating: int, review_text: str | None = None,
+        approval_id: str | None = None,
+    ) -> Any:
+        return self._request_json("POST", f"/agents/{agent_id}/reviews", payload={
+            "invocation_id": invocation_id, "rating": rating, "review_text": review_text,
+        }, headers={"X-User-Approval": approval_id} if approval_id else None)

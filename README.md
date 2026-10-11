@@ -1,10 +1,10 @@
 # AgentMesh MCP Adapter for AgentsLedge
 
-This separate MCP server connects to the AgentsLedge FastAPI marketplace. Its tools are read-only and use real listing data: service discovery, active category listing, and provider comparison. It does not create negotiations, run providers, move tokens, change reputation, or write reviews.
+This separate MCP server connects ChatGPT to the AgentsLedge FastAPI marketplace. It keeps the existing real-data discovery tools and adds user-authorized negotiation, invocation, and verified-review workflows. It calls the existing backend routes and never reads or writes the database directly.
 
 ## Per-user authorization
 
-For remote Streamable HTTP, the MCP SDK validates each bearer token by calling the AgentsLedge OAuth introspection endpoint. It checks the exact issuer, 15-minute expiry, `marketplace:read` scope, and MCP resource audience. Each tool forwards the same user token to the API; AgentsLedge only permits it on marketplace read routes. Authorization uses OAuth Authorization Code with PKCE S256 and an explicit AgentsLedge sign-in/consent screen. Each access token is linked to the user who approved it. Existing website login and JWTs are unchanged.
+For remote Streamable HTTP, the MCP SDK validates each bearer token by calling the AgentsLedge OAuth introspection endpoint. It checks issuer, 15-minute expiry, supported scopes, and the exact MCP resource audience. Each tool forwards the same user token to the API. Read tools require `marketplace:read`; write tools require both `marketplace:read` and `marketplace:write`, and the backend enforces those scopes again. Authorization uses OAuth Authorization Code with PKCE S256 and an explicit AgentsLedge sign-in/consent screen. Each token is tied to the user who approved it. Existing website login and JWTs are unchanged.
 
 Tools:
 
@@ -41,7 +41,13 @@ $env:AGENTMESH_MCP_PORT = "8011"
 .\.venv\Scripts\python.exe -m agentmesh_mcp.server
 ```
 
-The SDK advertises OAuth resource metadata on the MCP endpoint. A compatible client can initiate the browser authorization flow and call the tools. The default stdio transport is available for a local Inspector process; stdio is protected by the local process boundary and does not use HTTP bearer middleware.
+The remote server publishes OAuth protected-resource metadata advertising both supported scopes. A compatible client can initiate the browser authorization flow and call the tools. The default stdio transport is available for a local Inspector process; stdio is protected by the local process boundary and does not use HTTP bearer middleware.
+
+Write tools are: `start_negotiation`, `submit_negotiation_offer`, `accept_negotiation`, `reject_negotiation`, `invoke_service_agent`, and `submit_agent_review`. A write tool call without `approval_id` only creates a pending approval. The user signs into the AgentsLedge website, reviews the exact service, price/budget, input or review at `/approvals`, and approves or rejects it. Only then can the caller repeat the same action with the one-time approval ID. The backend binds it to the user and action, checks expiry and current state, and consumes it once; tool instructions are not the security control. Acceptance itself records an agreement; token settlement occurs only through the existing invocation endpoint after successful live execution. Invocation requires a stable idempotency key for safe retries.
+
+The read tools are: `list_service_categories`, `discover_services`, `compare_providers`, `get_service_details`, `get_negotiation_status`, `get_invocation_result`, `get_agent_reputation`, and `get_agent_reviews`. Negotiations and invocation results are checked against the authenticated account by the backend. No caller-supplied user ID is accepted. Admin routes, token purchases, account details, and arbitrary database writes are not exposed.
+
+Gemini execution remains controlled by backend settings through the existing OpenAI-compatible endpoint. Configure `AI_PROVIDER=gemini`, `GEMINI_API_KEY`, a Gemini-supported `AI_MODEL`, and `AI_MODE=live`; a key alone does not enable live mode. With live mode enabled but no key, the backend returns a configuration error before charging. When a live provider fails, it reports a 502 and releases any reserved tokens rather than returning a demo response under a live label. Unsupported listings stay discoverable but are marked non-executable and fail before token reservation. Without live mode/key, supported handlers may return labeled demo results, which are not reviewable.
 
 Run tests with:
 
@@ -59,4 +65,4 @@ No service has been deployed. For remote use, host the API and adapter separatel
 - Backend `CORS_ORIGINS` = exact frontend HTTPS origin.
 - Backend `SECRET_KEY` = generated secret in the host's secret manager; `DATABASE_URL` = persistent managed database.
 
-Apply the backend migration with `alembic upgrade head` before starting. Configure shared edge rate limiting for multi-worker hosting; the included per-process limit is only a baseline. See `../agenticxchange/docs/agentmesh-oauth-deployment.md` for the complete checklist and ChatGPT plan compatibility evidence.
+Apply the backend migration with `alembic upgrade head` before starting. Configure shared edge rate limiting for multi-worker hosting; the included per-process limit is only a baseline. See `../agenticxchange/docs/agentmesh-oauth-deployment.md` for the deployment checklist and ChatGPT plan compatibility evidence. Do not change Render or deploy these changes without review and authorization.
