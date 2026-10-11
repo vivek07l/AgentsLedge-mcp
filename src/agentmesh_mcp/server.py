@@ -35,7 +35,7 @@ WRITE_SCOPE = "marketplace:write"
 SUPPORTED_SCOPES = {READ_SCOPE, WRITE_SCOPE}
 WRITE_TOOLS = {
     "start_negotiation", "submit_negotiation_offer", "accept_negotiation",
-    "reject_negotiation", "invoke_service_agent", "summarize_meeting_notes", "submit_agent_review",
+    "reject_negotiation", "invoke_service_agent", "execute_marketplace_service", "summarize_meeting_notes", "submit_agent_review",
 }
 
 
@@ -460,6 +460,34 @@ def invoke_service_agent(
         except Exception as exc:
             return _tool_failure(exc)
 
+
+@mcp.tool()
+def execute_marketplace_service(
+    agent_id: int, negotiation_id: int, input_data: dict[str, Any], idempotency_key: str,
+    approval_id: str = "",
+) -> dict[str, Any]:
+    """Execute a configured marketplace listing after the user approves the exact request. Requires marketplace:write scope, an accepted negotiation, a stable idempotency key, and website approval. First call without approval_id to request approval, then repeat with the ID. This may spend tokens."""
+    if agent_id < 1 or negotiation_id < 1:
+        return {"ok": False, "error": "agent_id and negotiation_id must be positive integers"}
+    if not isinstance(input_data, dict) or not input_data:
+        return {"ok": False, "error": "input_data must be a non-empty object"}
+    if not idempotency_key.strip() or len(idempotency_key) > 255:
+        return {"ok": False, "error": "idempotency_key must be non-empty and at most 255 characters"}
+    if scope_error := _scope_error(WRITE_SCOPE):
+        return {"ok": False, "error": scope_error}
+    with _client_context() as client:
+        try:
+            service = client.get_agent_details(agent_id)
+            if not isinstance(service, dict) or service.get("execution_available") is not True:
+                return {"ok": False, "error": "This listing is disabled or unavailable for execution in AgentsLedge."}
+            payload = {"agent_id": agent_id, "negotiation_id": negotiation_id,
+                       "input_data": input_data, "idempotency_key": idempotency_key}
+            if not approval_id:
+                return _pending_approval(client, "invoke_service", payload)
+            execution = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id)
+            return {"ok": True, "service": service, "execution": execution}
+        except Exception as exc:
+            return _tool_failure(exc)
 
 @mcp.tool()
 def summarize_meeting_notes(
