@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentmesh-mcp"
 version = "0.1.0"
-description = "Read-only MCP adapter for the existing AgentLedge marketplace API"
+description = "Per-user OAuth MCP integration for the AgentsLedge marketplace API"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
