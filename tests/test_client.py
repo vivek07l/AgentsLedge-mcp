@@ -1,3 +1,4 @@
+import json
 import httpx
 import pytest
 
@@ -99,7 +100,7 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
     ]
     invoke = seen[5]
     assert invoke[2] == "stable-key"
-    assert b'"negotiation_id":5' in invoke[4]
+    assert json.loads(invoke[4])["negotiation_id"] == 5
     assert [approval for _, _, _, approval, _ in seen if approval] == [
         "approved-start", "approved-offer", "approved-accept", "approved-reject", "approved-run", "approved-review",
     ]
@@ -120,4 +121,5 @@ def test_request_action_approval_uses_existing_authenticated_api():
         client.close()
 
     assert response["approval_id"] == "pending-id"
-    assert seen == [("POST", "/mcp/action-approvals", b'{"action":"accept_negotiation","payload":{"negotiation_id":12}}')]
+    assert seen[0][0:2] == ("POST", "/mcp/action-approvals")
+    assert json.loads(seen[0][2]) == {"action": "accept_negotiation", "payload": {"negotiation_id": 12}}

@@ -93,7 +93,7 @@ class FakeMarketplaceClient:
         return {"agent_id": agent_id, "average_rating": 4.8, "success_rate": 95}
 
     def get_agent_details(self, agent_id):
-        return {"id": agent_id, "name": "Resume Pro"}
+        return {"id": agent_id, "name": "Resume Pro", "execution_available": True}
 
     def get_agent_reviews(self, agent_id):
         return [{"id": 9, "agent_id": agent_id, "rating": 5}]
@@ -209,6 +209,7 @@ def test_all_write_tools_require_write_scope_and_call_existing_api_methods(monke
         (server.accept_negotiation, (100,), "negotiation", "accept_negotiation"),
         (server.reject_negotiation, (100,), "negotiation", "reject_negotiation"),
         (server.invoke_service_agent, (2, 100, {"input_text": "review"}, "run-once"), "execution", "invoke_service"),
+        (server.execute_marketplace_service, (2, 100, {"input_text": "review"}, "run-once"), "execution", "invoke_service"),
         (server.submit_agent_review, (2, 200, 5, "Helpful"), "review", "submit_review"),
     ]
     for tool, args, result_key, action in cases:
@@ -293,7 +294,8 @@ def test_remote_resource_metadata_advertises_read_and_write_scopes():
 
 def test_write_tools_describe_user_approval_requirements():
     for tool in (server.start_negotiation, server.submit_negotiation_offer, server.accept_negotiation,
-                 server.reject_negotiation, server.invoke_service_agent, server.summarize_meeting_notes,
+                 server.reject_negotiation, server.invoke_service_agent,
+                 server.execute_marketplace_service, server.summarize_meeting_notes,
                  server.submit_agent_review):
         assert "approval_id" in tool.__doc__
         assert "approval" in tool.__doc__.lower()
@@ -308,9 +310,11 @@ def test_tool_security_metadata_requires_read_plus_write_for_mutations():
             {"name": "discover_services"},
             {"name": "accept_negotiation"},
             {"name": "summarize_meeting_notes"},
+            {"name": "execute_marketplace_service"},
         ]}
 
     result = asyncio.run(server.ChatGPTToolSecurityMiddleware()(Context(), call_next))
     assert result["tools"][0]["securitySchemes"][0]["scopes"] == ["marketplace:read"]
     assert result["tools"][1]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
     assert result["tools"][2]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
+    assert result["tools"][3]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
