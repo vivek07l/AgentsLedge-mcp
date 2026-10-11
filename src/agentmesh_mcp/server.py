@@ -35,7 +35,7 @@ WRITE_SCOPE = "marketplace:write"
 SUPPORTED_SCOPES = {READ_SCOPE, WRITE_SCOPE}
 WRITE_TOOLS = {
     "start_negotiation", "submit_negotiation_offer", "accept_negotiation",
-    "reject_negotiation", "invoke_service_agent", "submit_agent_review",
+    "reject_negotiation", "invoke_service_agent", "summarize_meeting_notes", "submit_agent_review",
 }
 
 
@@ -457,6 +457,62 @@ def invoke_service_agent(
                 })
             result = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id)
             return {"ok": True, "execution": result}
+        except Exception as exc:
+            return _tool_failure(exc)
+
+
+@mcp.tool()
+def summarize_meeting_notes(
+    text: str, negotiation_id: int, idempotency_key: str, approval_id: str = "",
+) -> dict[str, Any]:
+    """Summarize notes with the active AgentsLedge Gemini Meeting Summarizer.
+
+    Requires an accepted marketplace negotiation and marketplace:write scope.
+    First call without approval_id to request approval for the exact notes and
+    agreed service. Approve that action on the AgentsLedge website, then repeat
+    with the returned approval_id. Reuse the same idempotency_key for retries.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return {"ok": False, "error": "text must contain non-whitespace text"}
+    if len(text) > 20000:
+        return {"ok": False, "error": "text must be at most 20000 characters"}
+    if negotiation_id < 1:
+        return {"ok": False, "error": "negotiation_id must be positive"}
+    if not idempotency_key.strip() or len(idempotency_key) > 255:
+        return {"ok": False, "error": "idempotency_key must be non-empty and at most 255 characters"}
+    if scope_error := _scope_error(WRITE_SCOPE):
+        return {"ok": False, "error": scope_error}
+
+    with _client_context() as client:
+        try:
+            payload = client.discover_services(query="Meeting Summarizer", limit=100, offset=0)
+            records, _ = extract_records(payload)
+            matches = [
+                record for record in records
+                if record.get("name") == "Meeting Summarizer"
+                and record.get("execution_available") is True
+            ]
+            if len(matches) != 1:
+                return {
+                    "ok": False,
+                    "error": "There must be exactly one configured, executable Meeting Summarizer listing. Check Gemini settings and the AgentsLedge admin listing configuration.",
+                }
+            agent_id = matches[0].get("id", matches[0].get("agent_id"))
+            if not isinstance(agent_id, int) or agent_id < 1:
+                return {"ok": False, "error": "The Meeting Summarizer listing returned an invalid service ID"}
+            input_data = {"input_text": text}
+            approval_payload = {
+                "agent_id": agent_id,
+                "negotiation_id": negotiation_id,
+                "input_data": input_data,
+                "idempotency_key": idempotency_key,
+            }
+            if not approval_id:
+                return _pending_approval(client, "invoke_service", approval_payload)
+            result = client.invoke_service_agent(
+                agent_id, input_data, negotiation_id, idempotency_key, approval_id,
+            )
+            return {"ok": True, "service": matches[0], "execution": result}
         except Exception as exc:
             return _tool_failure(exc)
 
