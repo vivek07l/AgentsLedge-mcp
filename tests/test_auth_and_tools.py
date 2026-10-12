@@ -1,5 +1,6 @@
 import asyncio
 import time
+from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -280,6 +281,8 @@ def test_autonomous_policy_read_tool_returns_policy_and_balance(monkeypatch):
     assert result["ok"] is True
     assert result["policy"]["enabled"] is True
     assert result["balance"]["token_balance"] == 12
+    balance = _run_as_user(monkeypatch, server.get_marketplace_balance, client)
+    assert balance == {"ok": True, "balance": {"token_balance": 12, "remaining_daily_budget": 10}}
 
 
 def test_complete_marketplace_workflow_reuses_accepted_negotiation_and_gets_result(monkeypatch):
@@ -388,7 +391,7 @@ def test_mcp_tool_registry_has_unique_complete_workflow_names():
     assert len(names) == len(set(names))
     assert {
         "discover_services", "compare_providers", "get_service_details", "get_autonomous_policy",
-        "list_my_negotiations", "start_negotiation", "submit_negotiation_offer",
+        "get_marketplace_balance", "list_my_negotiations", "start_negotiation", "submit_negotiation_offer",
         "accept_negotiation", "execute_marketplace_service", "summarize_meeting_notes",
         "get_invocation_result", "submit_agent_review", "complete_marketplace_workflow",
     } <= set(names)
@@ -481,3 +484,23 @@ def test_tool_security_metadata_requires_read_plus_write_for_mutations():
     assert result["tools"][2]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
     assert result["tools"][3]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
     assert result["tools"][4]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
+
+
+def test_dispatch_middleware_accepts_connector_qualified_tool_names():
+    @dataclass
+    class Context:
+        method: str
+        params: dict
+
+    seen = {}
+
+    async def call_next(ctx):
+        seen["name"] = ctx.params["name"]
+        return {"ok": True}
+
+    result = asyncio.run(server.ChatGPTToolSecurityMiddleware()(
+        Context("tools/call", {"name": "agentsledge_execution.discover_services", "arguments": {}}),
+        call_next,
+    ))
+    assert result == {"ok": True}
+    assert seen["name"] == "discover_services"
