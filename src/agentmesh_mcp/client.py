@@ -28,6 +28,16 @@ def _normalise_base_url(value: str | None) -> str:
 class AgentLedgeClient:
     """HTTP client that delegates policy and state changes to the backend."""
 
+    _SAFE_AUTHORIZATION_DETAILS = {
+        "This API operation is not available to MCP clients",
+        "This action approval is missing, expired, or already used",
+        "Approve this exact action in the AgentsLedge website first",
+        "An authorized negotiation for this service is required",
+        "You are not a participant in this negotiation",
+        "Only the buyer can request this action approval",
+        "Only a negotiation participant can request rejection",
+    }
+
     def __init__(
         self,
         base_url: str | None = None,
@@ -60,7 +70,7 @@ class AgentLedgeClient:
         return self._request_json("GET", path, params=params)
 
     @staticmethod
-    def _error_for_status(status_code: int, method: str, path: str) -> str:
+    def _error_for_status(status_code: int, method: str, path: str, api_detail: str | None = None) -> str:
         messages = {
             401: "Authorization is missing or expired. Reconnect your AgentsLedge account.",
             402: "The account does not have enough marketplace tokens for this service.",
@@ -71,6 +81,11 @@ class AgentLedgeClient:
             502: "The service provider could not complete execution. No successful result was recorded.",
         }
         detail = messages.get(status_code, "The AgentsLedge API could not complete this request.")
+        if status_code == 403 and (
+            api_detail in AgentLedgeClient._SAFE_AUTHORIZATION_DETAILS
+            or api_detail in {"OAuth token requires marketplace:read", "OAuth token requires marketplace:write"}
+        ):
+            detail = f"{detail} Backend reason: {api_detail}."
         return f"{detail} (HTTP {status_code} for {method} /{path})"
 
     def _request_json(
@@ -96,7 +111,17 @@ class AgentLedgeClient:
             )
         if response.status_code >= 400:
             # Do not relay arbitrary response bodies or internal exception data.
-            raise AgentLedgeAPIError(self._error_for_status(response.status_code, method, safe_path))
+            api_detail = None
+            if response.status_code == 403:
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict) and isinstance(body.get("detail"), str):
+                    api_detail = body["detail"]
+            raise AgentLedgeAPIError(self._error_for_status(
+                response.status_code, method, safe_path, api_detail=api_detail,
+            ))
         try:
             return response.json()
         except ValueError as exc:
@@ -134,6 +159,10 @@ class AgentLedgeClient:
 
     def get_negotiation_status(self, negotiation_id: int) -> Any:
         return self.get_json(f"/negotiations/{negotiation_id}")
+
+    def list_my_negotiations(self) -> Any:
+        """List only negotiations attached to the authenticated marketplace user."""
+        return self.get_json("/users/me/negotiations")
 
     def get_invocation_result(self, invocation_id: int) -> Any:
         return self.get_json(f"/users/me/invocations/{invocation_id}")
