@@ -111,6 +111,8 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
         client.start_negotiation(4, 10, 8, "approved-start")
         client.get_negotiation_status(5)
         client.list_my_negotiations()
+        client.get_autonomous_policy()
+        client.get_marketplace_balance()
         client.submit_negotiation_offer(5, 9, "approved-offer")
         client.accept_negotiation(5, "approved-accept")
         client.reject_negotiation(5, "approved-reject")
@@ -126,6 +128,8 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
         ("POST", "/negotiations"),
         ("GET", "/negotiations/5"),
         ("GET", "/users/me/negotiations"),
+        ("GET", "/users/me/autonomous-policy"),
+        ("GET", "/users/me/marketplace-balance"),
         ("POST", "/negotiations/5/offers"),
         ("POST", "/negotiations/5/accept"),
         ("POST", "/negotiations/5/reject"),
@@ -135,7 +139,7 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
         ("GET", "/agents/4/reviews"),
         ("POST", "/agents/4/reviews"),
     ]
-    invoke = seen[6]
+    invoke = seen[8]
     assert invoke[2] == "stable-key"
     assert json.loads(invoke[4])["negotiation_id"] == 5
     assert [approval for _, _, _, approval, _ in seen if approval] == [
