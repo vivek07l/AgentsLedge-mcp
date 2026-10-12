@@ -7,6 +7,7 @@ For remote use, run Streamable HTTP behind HTTPS with the configured OAuth issue
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Literal
 import math
 import time
@@ -44,6 +45,17 @@ class ChatGPTToolSecurityMiddleware(ServerMiddleware[Any]):
     """Expose per-tool OAuth scopes for clients that support OpenAI's MCP extension."""
 
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next):
+        # ChatGPT may send the connector-qualified name it advertised (for
+        # example, ``agentsledge_execution.discover_services``) back to MCP.
+        # The registry uses the unqualified function name, so normalize that
+        # one known connector prefix before the SDK dispatches the call.
+        if ctx.method == "tools/call" and isinstance(ctx.params, dict):
+            name = ctx.params.get("name")
+            prefix = "agentsledge_execution."
+            if isinstance(name, str) and name.startswith(prefix):
+                params = dict(ctx.params)
+                params["name"] = name[len(prefix):]
+                ctx = replace(ctx, params=params)
         result = await call_next(ctx)
         if ctx.method == "tools/list" and isinstance(result, dict):
             for tool in result.get("tools", []):
@@ -323,6 +335,18 @@ def get_autonomous_policy() -> dict[str, Any]:
         try:
             return {"ok": True, "policy": client.get_autonomous_policy(),
                     "balance": client.get_marketplace_balance()}
+        except Exception as exc:
+            return _tool_failure(exc)
+
+
+@mcp.tool()
+def get_marketplace_balance() -> dict[str, Any]:
+    """Read this authenticated account's token balance and daily spending snapshot."""
+    if scope_error := _scope_error(READ_SCOPE):
+        return {"ok": False, "error": scope_error}
+    with _client_context() as client:
+        try:
+            return {"ok": True, "balance": client.get_marketplace_balance()}
         except Exception as exc:
             return _tool_failure(exc)
 
