@@ -93,7 +93,8 @@ class FakeMarketplaceClient:
         return {"agent_id": agent_id, "average_rating": 4.8, "success_rate": 95}
 
     def get_agent_details(self, agent_id):
-        return {"id": agent_id, "name": "Resume Pro", "execution_available": True}
+        return {"id": agent_id, "name": "Resume Pro", "category": "Writing", "price": 8,
+                "minimum_price": 2, "is_active": True, "execution_available": True}
 
     def get_agent_reviews(self, agent_id):
         return [{"id": 9, "agent_id": agent_id, "rating": 5}]
@@ -102,10 +103,24 @@ class FakeMarketplaceClient:
         return {"id": negotiation_id, "status": "awaiting_buyer"}
 
     def list_my_negotiations(self):
-        return [{"id": 100, "status": "accepted", "buyer_id": 7}]
+        return [{"id": 100, "agent_id": 2, "status": "accepted", "buyer_id": 7, "agreed_price": 8}]
+
+    def get_autonomous_policy(self):
+        return {"enabled": True, "max_task_budget": 10, "allowed_categories": ["Writing"]}
+
+    def get_marketplace_balance(self):
+        return {"token_balance": 12, "remaining_daily_budget": 10}
 
     def get_invocation_result(self, invocation_id):
         return {"invocation_id": invocation_id, "result": {"output_text": "result"}}
+
+    def get_autonomous_policy(self):
+        return {"enabled": True, "max_task_budget": 10, "max_offer_price": 10,
+                "allowed_categories": ["Writing"], "allowed_listing_ids": [],
+                "max_negotiation_attempts": 2}
+
+    def get_marketplace_balance(self):
+        return {"token_balance": 12, "remaining_daily_budget": 10}
 
     def start_negotiation(self, agent_id, buyer_budget, initial_offer, approval_id=None):
         self.write_calls.append(("start_negotiation", approval_id))
@@ -193,6 +208,7 @@ def test_all_additional_read_tools_map_to_authenticated_backend_routes(monkeypat
         (server.get_service_details, (12,), "service"),
         (server.get_negotiation_status, (13,), "negotiation"),
         (server.list_my_negotiations, (), "negotiations"),
+        (server.get_autonomous_policy, (), "policy"),
         (server.get_invocation_result, (14,), "invocation"),
         (server.get_agent_reputation, (15,), "reputation"),
         (server.get_agent_reviews, (16,), "reviews"),
@@ -234,6 +250,73 @@ def test_all_write_tools_require_write_scope_and_call_existing_api_methods(monke
     assert denied["ok"] is False
     assert "marketplace:write" in denied["error"]
     assert read_only_client.closed is False
+
+
+def test_autonomous_policy_authorization_executes_write_without_pending_approval(monkeypatch):
+    class AutonomousClient(FakeMarketplaceClient):
+        def request_action_approval(self, action, payload):
+            self.write_calls.append(("policy_gate", None))
+            return {"approval_required": False, "autonomous_authorized": True}
+
+    cases = [
+        (server.start_negotiation, (2, 10, 8), "start_negotiation"),
+        (server.submit_negotiation_offer, (100, 8), "submit_offer"),
+        (server.accept_negotiation, (100,), "accept_negotiation"),
+        (server.execute_marketplace_service, (2, 100, {"input_text": "x"}, "policy-run"), "invoke_service"),
+        (server.submit_agent_review, (2, 200, 5, "completed"), "submit_review"),
+    ]
+    for tool, args, action in cases:
+        client = AutonomousClient([{"id": 2, "name": "Writing Service", "execution_available": True}])
+        result = _run_as_user(monkeypatch, tool, client, *args,
+                              scopes=["marketplace:read", "marketplace:write"])
+        assert result["ok"] is True
+        assert client.write_calls[0] == ("policy_gate", None)
+        assert (action, None) in client.write_calls
+
+
+def test_autonomous_policy_read_tool_returns_policy_and_balance(monkeypatch):
+    client = FakeMarketplaceClient([])
+    result = _run_as_user(monkeypatch, server.get_autonomous_policy, client)
+    assert result["ok"] is True
+    assert result["policy"]["enabled"] is True
+    assert result["balance"]["token_balance"] == 12
+
+
+def test_complete_marketplace_workflow_reuses_accepted_negotiation_and_gets_result(monkeypatch):
+    class AutonomousClient(FakeMarketplaceClient):
+        def request_action_approval(self, action, payload):
+            self.write_calls.append(("policy_gate", None))
+            return {"approval_required": False, "autonomous_authorized": True}
+
+    client = AutonomousClient([{
+        "id": 2, "name": "Writing Service", "category": "Writing", "price": 8,
+        "average_rating": 4.7, "success_rate": 96, "is_active": True,
+        "execution_available": True,
+    }])
+    result = _run_as_user(
+        monkeypatch, server.complete_marketplace_workflow, client,
+        "writing", {"input_text": "Summarize"}, "workflow-idempotency-key",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert result["ok"] is True
+    assert result["negotiation"]["id"] == 100
+    assert result["providers_compared"] == 1
+    assert "provider_comparison" in result["workflow"]
+    assert result["execution"]["invocation_id"] == 200
+    assert result["invocation"]["invocation_id"] == 200
+    assert result["provider_was_called"] is True
+    assert client.write_calls == [("policy_gate", None), ("invoke_service", None)]
+
+
+def test_mcp_tool_registry_has_unique_complete_workflow_names():
+    names = [tool.name for tool in asyncio.run(server.mcp.list_tools())]
+    assert len(names) == len(set(names))
+    assert {
+        "discover_services", "compare_providers", "get_service_details", "get_autonomous_policy",
+        "list_my_negotiations", "start_negotiation", "submit_negotiation_offer",
+        "accept_negotiation", "execute_marketplace_service", "summarize_meeting_notes",
+        "get_invocation_result", "submit_agent_review", "complete_marketplace_workflow",
+    } <= set(names)
 
 
 def test_gemini_summarization_tool_uses_live_listing_and_exact_approval(monkeypatch):
@@ -296,13 +379,12 @@ def test_remote_resource_metadata_advertises_read_and_write_scopes():
     assert body["scopes_supported"] == ["marketplace:read", "marketplace:write"]
 
 
-def test_write_tools_describe_user_approval_requirements():
+def test_write_tools_describe_policy_and_manual_approval_modes():
     for tool in (server.start_negotiation, server.submit_negotiation_offer, server.accept_negotiation,
                  server.reject_negotiation, server.invoke_service_agent,
                  server.execute_marketplace_service, server.summarize_meeting_notes,
-                 server.submit_agent_review):
-        assert "approval_id" in tool.__doc__
-        assert "approval" in tool.__doc__.lower()
+                 server.submit_agent_review, server.complete_marketplace_workflow):
+        assert "policy" in tool.__doc__.lower() or "approval" in tool.__doc__.lower()
 
 
 def test_tool_security_metadata_requires_read_plus_write_for_mutations():
@@ -315,6 +397,7 @@ def test_tool_security_metadata_requires_read_plus_write_for_mutations():
             {"name": "accept_negotiation"},
             {"name": "summarize_meeting_notes"},
             {"name": "execute_marketplace_service"},
+            {"name": "complete_marketplace_workflow"},
         ]}
 
     result = asyncio.run(server.ChatGPTToolSecurityMiddleware()(Context(), call_next))
@@ -322,3 +405,4 @@ def test_tool_security_metadata_requires_read_plus_write_for_mutations():
     assert result["tools"][1]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
     assert result["tools"][2]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
     assert result["tools"][3]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]
+    assert result["tools"][4]["securitySchemes"][0]["scopes"] == ["marketplace:read", "marketplace:write"]

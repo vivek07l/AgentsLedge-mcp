@@ -36,7 +36,7 @@ SUPPORTED_SCOPES = {READ_SCOPE, WRITE_SCOPE}
 WRITE_TOOLS = {
     "start_negotiation", "submit_negotiation_offer", "accept_negotiation",
     "reject_negotiation", "invoke_service_agent", "execute_marketplace_service",
-    "summarize_meeting_notes", "submit_agent_review",
+    "summarize_meeting_notes", "submit_agent_review", "complete_marketplace_workflow",
 }
 
 
@@ -126,8 +126,10 @@ def _tool_failure(error: Exception) -> dict[str, Any]:
     return {"ok": False, "error": "The AgentsLedge API could not complete this request."}
 
 
-def _pending_approval(client: AgentLedgeClient, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _pending_approval(client: AgentLedgeClient, action: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     approval = client.request_action_approval(action, payload)
+    if approval.get("autonomous_authorized") is True and approval.get("approval_required") is False:
+        return None
     return {
         "ok": True,
         "approval_required": True,
@@ -313,6 +315,19 @@ def get_service_details(agent_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def get_autonomous_policy() -> dict[str, Any]:
+    """Read this authenticated account's autonomous workflow limits and token balance snapshot."""
+    if scope_error := _scope_error(READ_SCOPE):
+        return {"ok": False, "error": scope_error}
+    with _client_context() as client:
+        try:
+            return {"ok": True, "policy": client.get_autonomous_policy(),
+                    "balance": client.get_marketplace_balance()}
+        except Exception as exc:
+            return _tool_failure(exc)
+
+
+@mcp.tool()
 def list_my_negotiations() -> dict[str, Any]:
     """List negotiations belonging to the authenticated AgentsLedge account only.
 
@@ -389,7 +404,7 @@ def get_agent_reviews(agent_id: int) -> dict[str, Any]:
 
 @mcp.tool()
 def start_negotiation(agent_id: int, buyer_budget: float, initial_offer: float, approval_id: str = "") -> dict[str, Any]:
-    """Create a negotiation only after explicit user approval of the offer and maximum budget. First call without approval_id to request approval; then repeat with the approval_id shown after the user approves it in AgentsLedge /approvals. No tokens are charged here."""
+    """Start a negotiation within enabled account limits, or request manual approval when autonomous mode is off."""
     if not math.isfinite(buyer_budget) or not math.isfinite(initial_offer) or buyer_budget <= 0 or initial_offer <= 0 or initial_offer > buyer_budget:
         return {"ok": False, "error": "buyer_budget and initial_offer must be positive finite amounts, and the offer cannot exceed the budget"}
     if scope_error := _scope_error(WRITE_SCOPE):
@@ -397,17 +412,19 @@ def start_negotiation(agent_id: int, buyer_budget: float, initial_offer: float, 
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "start_negotiation", {
+                pending = _pending_approval(client, "start_negotiation", {
                     "agent_id": agent_id, "buyer_budget": buyer_budget, "initial_offer": initial_offer,
                 })
-            return {"ok": True, "negotiation": client.start_negotiation(agent_id, buyer_budget, initial_offer, approval_id)}
+                if pending is not None:
+                    return pending
+            return {"ok": True, "negotiation": client.start_negotiation(agent_id, buyer_budget, initial_offer, approval_id or None)}
         except Exception as exc:
             return _tool_failure(exc)
 
 
 @mcp.tool()
 def submit_negotiation_offer(negotiation_id: int, amount: float, approval_id: str = "") -> dict[str, Any]:
-    """Submit a buyer offer only after explicit user approval. First call without approval_id, have the user approve the exact amount in AgentsLedge /approvals, then repeat with that approval_id."""
+    """Submit an offer within enabled account limits, or request manual approval when autonomous mode is off."""
     if negotiation_id < 1 or not math.isfinite(amount) or amount <= 0:
         return {"ok": False, "error": "negotiation_id and amount must be positive; amount must be finite"}
     if scope_error := _scope_error(WRITE_SCOPE):
@@ -415,15 +432,17 @@ def submit_negotiation_offer(negotiation_id: int, amount: float, approval_id: st
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "submit_offer", {"negotiation_id": negotiation_id, "amount": amount})
-            return {"ok": True, "negotiation": client.submit_negotiation_offer(negotiation_id, amount, approval_id)}
+                pending = _pending_approval(client, "submit_offer", {"negotiation_id": negotiation_id, "amount": amount})
+                if pending is not None:
+                    return pending
+            return {"ok": True, "negotiation": client.submit_negotiation_offer(negotiation_id, amount, approval_id or None)}
         except Exception as exc:
             return _tool_failure(exc)
 
 
 @mcp.tool()
 def accept_negotiation(negotiation_id: int, approval_id: str = "") -> dict[str, Any]:
-    """Accept a provider counter-offer only after explicit approval of its displayed price. First call without approval_id, have the user approve it in AgentsLedge /approvals, then repeat with that approval_id. Execution may later charge the agreed price."""
+    """Accept only within enabled autonomous policy limits; manual accounts must approve the displayed price."""
     if negotiation_id < 1:
         return {"ok": False, "error": "negotiation_id must be a positive integer"}
     if scope_error := _scope_error(WRITE_SCOPE):
@@ -431,15 +450,17 @@ def accept_negotiation(negotiation_id: int, approval_id: str = "") -> dict[str, 
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "accept_negotiation", {"negotiation_id": negotiation_id})
-            return {"ok": True, "negotiation": client.accept_negotiation(negotiation_id, approval_id)}
+                pending = _pending_approval(client, "accept_negotiation", {"negotiation_id": negotiation_id})
+                if pending is not None:
+                    return pending
+            return {"ok": True, "negotiation": client.accept_negotiation(negotiation_id, approval_id or None)}
         except Exception as exc:
             return _tool_failure(exc)
 
 
 @mcp.tool()
 def reject_negotiation(negotiation_id: int, approval_id: str = "") -> dict[str, Any]:
-    """Reject a negotiation only after the user approves the exact rejection. First call without approval_id to request approval, then repeat with the ID after the website user approves."""
+    """Reject within enabled account policy, or request manual approval when autonomous mode is off."""
     if negotiation_id < 1:
         return {"ok": False, "error": "negotiation_id must be a positive integer"}
     if scope_error := _scope_error(WRITE_SCOPE):
@@ -447,8 +468,10 @@ def reject_negotiation(negotiation_id: int, approval_id: str = "") -> dict[str, 
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "reject_negotiation", {"negotiation_id": negotiation_id})
-            return {"ok": True, "negotiation": client.reject_negotiation(negotiation_id, approval_id)}
+                pending = _pending_approval(client, "reject_negotiation", {"negotiation_id": negotiation_id})
+                if pending is not None:
+                    return pending
+            return {"ok": True, "negotiation": client.reject_negotiation(negotiation_id, approval_id or None)}
         except Exception as exc:
             return _tool_failure(exc)
 
@@ -458,7 +481,7 @@ def invoke_service_agent(
     agent_id: int, negotiation_id: int, input_data: dict[str, Any], idempotency_key: str,
     approval_id: str = "",
 ) -> dict[str, Any]:
-    """Run an accepted marketplace service only after website approval of the exact input and agreed price. First call without approval_id to request approval, then repeat with the ID after the user approves in AgentsLedge /approvals. This may spend tokens. Reuse the same idempotency_key when retrying the same request."""
+    """Run an accepted service within enabled account limits, or request manual approval. This may spend tokens; reuse the same idempotency key for retries."""
     if agent_id < 1 or negotiation_id < 1:
         return {"ok": False, "error": "agent_id and negotiation_id must be positive integers"}
     if not isinstance(input_data, dict):
@@ -470,11 +493,13 @@ def invoke_service_agent(
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "invoke_service", {
+                pending = _pending_approval(client, "invoke_service", {
                     "agent_id": agent_id, "negotiation_id": negotiation_id,
                     "input_data": input_data, "idempotency_key": idempotency_key,
                 })
-            result = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id)
+                if pending is not None:
+                    return pending
+            result = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id or None)
             return {"ok": True, "execution": result}
         except Exception as exc:
             return _tool_failure(exc)
@@ -485,7 +510,7 @@ def execute_marketplace_service(
     agent_id: int, negotiation_id: int, input_data: dict[str, Any], idempotency_key: str,
     approval_id: str = "",
 ) -> dict[str, Any]:
-    """Execute a configured marketplace listing after the user approves the exact request. Requires marketplace:write scope, an accepted negotiation, a stable idempotency key, and website approval. First call without approval_id to request approval, then repeat with the ID. This may spend tokens."""
+    """Execute a configured listing within enabled account policy or after manual approval. Requires marketplace:write, an accepted negotiation and stable key; may spend tokens."""
     if agent_id < 1 or negotiation_id < 1:
         return {"ok": False, "error": "agent_id and negotiation_id must be positive integers"}
     if not isinstance(input_data, dict) or not input_data:
@@ -502,8 +527,10 @@ def execute_marketplace_service(
             payload = {"agent_id": agent_id, "negotiation_id": negotiation_id,
                        "input_data": input_data, "idempotency_key": idempotency_key}
             if not approval_id:
-                return _pending_approval(client, "invoke_service", payload)
-            execution = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id)
+                pending = _pending_approval(client, "invoke_service", payload)
+                if pending is not None:
+                    return pending
+            execution = client.invoke_service_agent(agent_id, input_data, negotiation_id, idempotency_key, approval_id or None)
             return {"ok": True, "service": service, "execution": execution}
         except Exception as exc:
             return _tool_failure(exc)
@@ -512,13 +539,7 @@ def execute_marketplace_service(
 def summarize_meeting_notes(
     text: str, negotiation_id: int, idempotency_key: str, approval_id: str = "",
 ) -> dict[str, Any]:
-    """Summarize notes with the active AgentsLedge Gemini Meeting Summarizer.
-
-    Requires an accepted marketplace negotiation and marketplace:write scope.
-    First call without approval_id to request approval for the exact notes and
-    agreed service. Approve that action on the AgentsLedge website, then repeat
-    with the returned approval_id. Reuse the same idempotency_key for retries.
-    """
+    """Summarize notes with the active Gemini listing under enabled account policy or manual approval."""
     if not isinstance(text, str) or not text.strip():
         return {"ok": False, "error": "text must contain non-whitespace text"}
     if len(text) > 20000:
@@ -555,9 +576,11 @@ def summarize_meeting_notes(
                 "idempotency_key": idempotency_key,
             }
             if not approval_id:
-                return _pending_approval(client, "invoke_service", approval_payload)
+                pending = _pending_approval(client, "invoke_service", approval_payload)
+                if pending is not None:
+                    return pending
             result = client.invoke_service_agent(
-                agent_id, input_data, negotiation_id, idempotency_key, approval_id,
+                agent_id, input_data, negotiation_id, idempotency_key, approval_id or None,
             )
             return {"ok": True, "service": matches[0], "execution": result}
         except Exception as exc:
@@ -566,7 +589,7 @@ def summarize_meeting_notes(
 
 @mcp.tool()
 def submit_agent_review(agent_id: int, invocation_id: int, rating: int, review_text: str = "", approval_id: str = "") -> dict[str, Any]:
-    """Submit a review only after the user approves the exact rating and text in AgentsLedge /approvals. First call without approval_id to request approval, then repeat with the ID. The backend requires your own successful, not demo, invocation and prevents duplicates."""
+    """Submit a verified review under enabled review policy, or request manual approval. The backend requires your own successful invocation and prevents duplicates."""
     if agent_id < 1 or invocation_id < 1 or not 1 <= rating <= 5 or len(review_text) > 1000:
         return {"ok": False, "error": "Use positive IDs, a rating from 1 to 5, and review_text no longer than 1000 characters"}
     if scope_error := _scope_error(WRITE_SCOPE):
@@ -574,11 +597,179 @@ def submit_agent_review(agent_id: int, invocation_id: int, rating: int, review_t
     with _client_context() as client:
         try:
             if not approval_id:
-                return _pending_approval(client, "submit_review", {
+                pending = _pending_approval(client, "submit_review", {
                     "agent_id": agent_id, "invocation_id": invocation_id,
                     "rating": rating, "review_text": review_text,
                 })
-            return {"ok": True, "review": client.submit_agent_review(agent_id, invocation_id, rating, review_text or None, approval_id)}
+                if pending is not None:
+                    return pending
+            return {"ok": True, "review": client.submit_agent_review(agent_id, invocation_id, rating, review_text or None, approval_id or None)}
+        except Exception as exc:
+            return _tool_failure(exc)
+
+
+@mcp.tool()
+def complete_marketplace_workflow(
+    service_query: str, input_data: dict[str, Any], idempotency_key: str,
+) -> dict[str, Any]:
+    """Run one marketplace task end-to-end under the signed-in account's enabled autonomous policy limits.
+
+    Reuses an accepted buyer negotiation when possible; otherwise negotiates only
+    within the account's configured caps. Executes the selected listing, returns
+    the persisted result and settlement, and includes any evidence-based automatic
+    review. No funds are added or purchased. Requires marketplace:write.
+    """
+    if not isinstance(service_query, str) or not service_query.strip() or not isinstance(input_data, dict) or not input_data:
+        return {"ok": False, "error": "Provide a service_query and non-empty JSON input_data."}
+    if not idempotency_key.strip() or len(idempotency_key) > 255:
+        return {"ok": False, "error": "idempotency_key must be non-empty and at most 255 characters"}
+    if scope_error := _scope_error(WRITE_SCOPE):
+        return {"ok": False, "error": scope_error}
+
+    with _client_context() as client:
+        try:
+            policy = client.get_autonomous_policy()
+            if not isinstance(policy, dict) or policy.get("enabled") is not True:
+                return {"ok": False, "error": "Autonomous mode is disabled. Configure and enable an account policy in AgentsLedge profile settings; no marketplace action was taken."}
+            allowed_categories = {str(value).strip().casefold() for value in policy.get("allowed_categories", [])}
+            allowed_ids = {int(value) for value in policy.get("allowed_listing_ids", [])}
+            balance = client.get_marketplace_balance()
+            remaining_daily = float(balance.get("remaining_daily_budget", 0))
+            available = float(balance.get("token_balance", 0))
+            cap = min(float(policy.get("max_task_budget", 0)), float(policy.get("max_offer_price", 0)), remaining_daily, available)
+            if cap <= 0:
+                return {"ok": False, "error": "Insufficient balance or no daily autonomous budget remains; no negotiation was started."}
+
+            discovered_payload = client.discover_services(query=service_query, sort="rating", limit=100, offset=0)
+            discovered, total = extract_records(discovered_payload)
+            candidates: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+            for record in discovered:
+                listing_id = record.get("agent_id", record.get("id"))
+                if not isinstance(listing_id, int) or listing_id < 1:
+                    continue
+                service = client.get_agent_details(listing_id)
+                category = str(service.get("category", "")).strip().casefold()
+                if (service.get("is_active") is not True or service.get("execution_available") is not True
+                        or (listing_id not in allowed_ids and category not in allowed_categories)):
+                    continue
+                reputation = None
+                if record.get("average_rating", record.get("rating")) is None or record.get("success_rate") is None:
+                    try:
+                        reputation = client.get_agent_reputation(listing_id)
+                    except AgentLedgeAPIError:
+                        reputation = None
+                comparable = normalise_provider({**record, **service}, reputation=reputation)
+                candidates.append((service, comparable, record))
+            if not candidates:
+                return {"ok": False, "error": "No active executable listing matched the query and account allowlist; no negotiation was started.",
+                        "query": service_query}
+            candidates.sort(key=lambda row: (
+                row[1].get("rating") is None,
+                -(float(row[1]["rating"]) if row[1].get("rating") is not None else 0),
+                row[1].get("success_rate") is None,
+                -(float(row[1]["success_rate"]) if row[1].get("success_rate") is not None else 0),
+                float(row[1].get("price") or row[0].get("price") or float("inf")),
+            ))
+
+            access = get_access_token()
+            subject = str(access.subject) if access else ""
+            negotiations = client.list_my_negotiations()
+            candidate_ids = {row[0]["id"] for row in candidates}
+            candidate_deals = [item for item in negotiations if item.get("agent_id") in candidate_ids
+                               and str(item.get("buyer_id")) == subject]
+            accepted_ids = {int(item["agent_id"]) for item in negotiations
+                            if item.get("agent_id") in candidate_ids and str(item.get("buyer_id")) == subject
+                            and item.get("status") == "accepted"
+                            and float(item.get("agreed_price") or float("inf")) <= cap}
+            if any(item.get("status") == "accepted" for item in candidate_deals) and not accepted_ids:
+                return {"ok": False, "stage": "negotiation", "error": "An accepted negotiation exists for this query, but its price exceeds the current autonomous policy. No duplicate negotiation was created."}
+            selected = next((row for row in candidates if row[0]["id"] in accepted_ids), candidates[0])
+            service, comparison, _ = selected
+            agent_id = int(service["id"])
+            eligible = [item for item in negotiations if item.get("agent_id") == agent_id and str(item.get("buyer_id")) == subject]
+            accepted = next((item for item in eligible if item.get("status") == "accepted"
+                             and float(item.get("agreed_price") or float("inf")) <= cap), None)
+            negotiation = accepted
+            if negotiation is None:
+                in_progress = next((item for item in eligible if item.get("status") in {"open", "awaiting_buyer"}), None)
+                if in_progress:
+                    negotiation = client.get_negotiation_status(int(in_progress["id"]))
+                else:
+                    listed = float(service.get("price", 0))
+                    floor = float(service.get("minimum_price") or listed * 0.8)
+                    initial_offer = min(cap, max(0.01, floor))
+                    if initial_offer < floor:
+                        return {"ok": False, "error": "The policy and available balance do not cover the provider's minimum price; no negotiation was started."}
+                    start_payload = {"agent_id": agent_id, "buyer_budget": cap, "initial_offer": initial_offer}
+                    pending = _pending_approval(client, "start_negotiation", start_payload)
+                    if pending is not None:
+                        return {**pending, "stage": "negotiation_approval"}
+                    negotiation = client.start_negotiation(agent_id, cap, initial_offer)
+
+            # Close an existing or newly opened negotiation only at a quoted
+            # price that fits both per-task and offer caps.
+            max_quote = min(float(policy.get("max_task_budget", 0)), float(policy.get("max_offer_price", 0)), available, remaining_daily)
+            negotiation_attempt_limit = max(1, min(5, int(policy.get("max_negotiation_attempts", 1))))
+            for attempt in range(negotiation_attempt_limit):
+                if negotiation.get("status") == "accepted":
+                    break
+                if negotiation.get("status") != "awaiting_buyer":
+                    return {"ok": False, "stage": "negotiation", "negotiation": negotiation,
+                            "error": "Negotiation is not awaiting buyer acceptance. No execution occurred."}
+                provider_quotes = [offer.get("amount") for offer in negotiation.get("offers", [])
+                                   if offer.get("actor_role") == "provider" and offer.get("action") == "counter"]
+                quote = provider_quotes[-1] if provider_quotes else None
+                if quote is None:
+                    return {"ok": False, "stage": "negotiation", "negotiation": negotiation,
+                            "error": "The provider did not return a price quote. No offer was accepted."}
+                if float(quote) > max_quote:
+                    buyer_offers = [float(offer["amount"]) for offer in negotiation.get("offers", [])
+                                    if offer.get("actor_role") == "buyer" and offer.get("action") in {"initial", "offer"}
+                                    and offer.get("amount") is not None]
+                    if attempt + 1 < negotiation_attempt_limit and (not buyer_offers or max(buyer_offers) < max_quote):
+                        pending = _pending_approval(client, "submit_offer", {
+                            "negotiation_id": int(negotiation["id"]), "amount": max_quote,
+                        })
+                        if pending is not None:
+                            return {**pending, "stage": "offer_approval", "negotiation": negotiation}
+                        negotiation = client.submit_negotiation_offer(int(negotiation["id"]), max_quote)
+                        continue
+                    return {"ok": False, "stage": "negotiation", "negotiation": negotiation,
+                            "error": "The provider's quote exceeds the account's autonomous price or task budget. No offer was accepted."}
+                pending = _pending_approval(client, "accept_negotiation", {"negotiation_id": int(negotiation["id"])})
+                if pending is not None:
+                    return {**pending, "stage": "acceptance_approval", "negotiation": negotiation}
+                negotiation = client.accept_negotiation(int(negotiation["id"]))
+                break
+            if negotiation.get("status") != "accepted":
+                return {"ok": False, "stage": "negotiation", "negotiation": negotiation,
+                        "error": "The configured negotiation limit was reached without an acceptable price."}
+            agreed_price = float(negotiation.get("agreed_price") or 0)
+            if agreed_price > max_quote:
+                return {"ok": False, "stage": "negotiation", "negotiation": negotiation,
+                        "error": "The accepted price exceeds the current account policy. No execution occurred."}
+
+            invoke_payload = {"agent_id": agent_id, "negotiation_id": int(negotiation["id"]),
+                              "input_data": input_data, "idempotency_key": idempotency_key}
+            pending = _pending_approval(client, "invoke_service", invoke_payload)
+            if pending is not None:
+                return {**pending, "stage": "execution_approval", "negotiation": negotiation}
+            execution = client.invoke_service_agent(agent_id, input_data, int(negotiation["id"]), idempotency_key)
+            invocation_id = execution.get("invocation_id") if isinstance(execution, dict) else None
+            if not isinstance(invocation_id, int) or invocation_id < 1:
+                return {"ok": False, "stage": "execution", "negotiation": negotiation,
+                        "execution": execution, "error": "The backend did not return a persisted invocation ID."}
+            persisted = client.get_invocation_result(invocation_id)
+            return {
+                "ok": True, "workflow": ["discovery", "provider_comparison", "service_verified", "negotiation_accepted", "execution_completed", "result_retrieved"],
+                "query": service_query, "providers_compared": len(candidates),
+                "results_complete": total is not None and len(discovered) >= total or len(discovered) < 100,
+                "selected_provider_comparison": comparison,
+                "service": service, "negotiation": negotiation, "execution": execution,
+                "invocation": persisted,
+                "automatic_review": execution.get("automatic_review"),
+                "provider_was_called": execution.get("execution_mode") == "live",
+            }
         except Exception as exc:
             return _tool_failure(exc)
 

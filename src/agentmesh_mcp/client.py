@@ -164,6 +164,14 @@ class AgentLedgeClient:
         """List only negotiations attached to the authenticated marketplace user."""
         return self.get_json("/users/me/negotiations")
 
+    def get_autonomous_policy(self) -> Any:
+        """Read the authenticated account's autonomous execution policy."""
+        return self.get_json("/users/me/autonomous-policy")
+
+    def get_marketplace_balance(self) -> Any:
+        """Read token balance and daily autonomous budget usage."""
+        return self.get_json("/users/me/marketplace-balance")
+
     def get_invocation_result(self, invocation_id: int) -> Any:
         return self.get_json(f"/users/me/invocations/{invocation_id}")
 
