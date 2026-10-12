@@ -313,6 +313,24 @@ def get_service_details(agent_id: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def list_my_negotiations() -> dict[str, Any]:
+    """List negotiations belonging to the authenticated AgentsLedge account only.
+
+    Use this to find the accepted negotiation ID before invoking a service and
+    verify that the connected account is the buyer on that negotiation. Read-only.
+    Requires marketplace:read.
+    """
+    if scope_error := _scope_error(READ_SCOPE):
+        return {"ok": False, "error": scope_error}
+    with _client_context() as client:
+        try:
+            negotiations = client.list_my_negotiations()
+            return {"ok": True, "count": len(negotiations), "negotiations": negotiations}
+        except Exception as exc:
+            return _tool_failure(exc)
+
+
+@mcp.tool()
 def get_negotiation_status(negotiation_id: int) -> dict[str, Any]:
     """Read a negotiation only when the authenticated user is one of its participants."""
     if negotiation_id < 1:

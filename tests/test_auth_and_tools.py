@@ -101,6 +101,9 @@ class FakeMarketplaceClient:
     def get_negotiation_status(self, negotiation_id):
         return {"id": negotiation_id, "status": "awaiting_buyer"}
 
+    def list_my_negotiations(self):
+        return [{"id": 100, "status": "accepted", "buyer_id": 7}]
+
     def get_invocation_result(self, invocation_id):
         return {"invocation_id": invocation_id, "result": {"output_text": "result"}}
 
@@ -189,6 +192,7 @@ def test_all_additional_read_tools_map_to_authenticated_backend_routes(monkeypat
     cases = [
         (server.get_service_details, (12,), "service"),
         (server.get_negotiation_status, (13,), "negotiation"),
+        (server.list_my_negotiations, (), "negotiations"),
         (server.get_invocation_result, (14,), "invocation"),
         (server.get_agent_reputation, (15,), "reputation"),
         (server.get_agent_reviews, (16,), "reviews"),

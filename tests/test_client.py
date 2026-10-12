@@ -45,6 +45,41 @@ def test_api_errors_do_not_forward_response_body():
     assert "internal secret details" not in str(caught.value)
 
 
+@pytest.mark.parametrize("detail", [
+    "An authorized negotiation for this service is required",
+    "This action approval is missing, expired, or already used",
+    "OAuth token requires marketplace:write",
+])
+def test_known_authorization_failures_explain_backend_reason(detail):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": detail})
+
+    client = AgentLedgeClient(base_url="http://testserver", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AgentLedgeAPIError) as caught:
+            client.invoke_service_agent(17, {"input_text": "Test"}, 12, "fixed-key", "approved-id")
+    finally:
+        client.close()
+
+    assert detail in str(caught.value)
+
+
+def test_unknown_authorization_response_body_remains_hidden():
+    secret = "internal account details should not be returned"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"detail": secret})
+
+    client = AgentLedgeClient(base_url="http://testserver", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(AgentLedgeAPIError) as caught:
+            client.invoke_service_agent(17, {"input_text": "Test"}, 12, "fixed-key", "approved-id")
+    finally:
+        client.close()
+
+    assert secret not in str(caught.value)
+
+
 def test_bad_base_url_is_rejected():
     with pytest.raises(ValueError):
         AgentLedgeClient(base_url="testserver")
@@ -75,6 +110,7 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
     try:
         client.start_negotiation(4, 10, 8, "approved-start")
         client.get_negotiation_status(5)
+        client.list_my_negotiations()
         client.submit_negotiation_offer(5, 9, "approved-offer")
         client.accept_negotiation(5, "approved-accept")
         client.reject_negotiation(5, "approved-reject")
@@ -89,6 +125,7 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
     assert [(method, path) for method, path, _, _, _ in seen] == [
         ("POST", "/negotiations"),
         ("GET", "/negotiations/5"),
+        ("GET", "/users/me/negotiations"),
         ("POST", "/negotiations/5/offers"),
         ("POST", "/negotiations/5/accept"),
         ("POST", "/negotiations/5/reject"),
@@ -98,7 +135,7 @@ def test_negotiation_execution_result_and_review_methods_reuse_backend_routes():
         ("GET", "/agents/4/reviews"),
         ("POST", "/agents/4/reviews"),
     ]
-    invoke = seen[5]
+    invoke = seen[6]
     assert invoke[2] == "stable-key"
     assert json.loads(invoke[4])["negotiation_id"] == 5
     assert [approval for _, _, _, approval, _ in seen if approval] == [
