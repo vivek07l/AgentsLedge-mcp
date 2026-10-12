@@ -308,6 +308,81 @@ def test_complete_marketplace_workflow_reuses_accepted_negotiation_and_gets_resu
     assert client.write_calls == [("policy_gate", None), ("invoke_service", None)]
 
 
+def test_complete_marketplace_workflow_negotiates_within_policy_then_executes(monkeypatch):
+    class NegotiatingClient(FakeMarketplaceClient):
+        def request_action_approval(self, action, payload):
+            self.write_calls.append(("policy_gate", None))
+            return {"approval_required": False, "autonomous_authorized": True}
+
+        def list_my_negotiations(self):
+            return []
+
+        def start_negotiation(self, agent_id, buyer_budget, initial_offer, approval_id=None):
+            self.write_calls.append(("start_negotiation", approval_id))
+            return {
+                "id": 101, "agent_id": agent_id, "buyer_budget": buyer_budget,
+                "status": "awaiting_buyer", "offers": [
+                    {"actor_role": "provider", "action": "counter", "amount": 8},
+                ],
+            }
+
+        def accept_negotiation(self, negotiation_id, approval_id=None):
+            self.write_calls.append(("accept_negotiation", approval_id))
+            return {"id": negotiation_id, "agent_id": 2, "status": "accepted", "agreed_price": 8}
+
+    client = NegotiatingClient([{
+        "id": 2, "name": "Writing Service", "category": "Writing", "price": 8,
+        "average_rating": 4.7, "success_rate": 96, "is_active": True,
+        "execution_available": True,
+    }])
+    result = _run_as_user(
+        monkeypatch, server.complete_marketplace_workflow, client,
+        "writing", {"input_text": "Summarize"}, "workflow-negotiation-key",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert result["ok"] is True
+    assert result["negotiation"]["id"] == 101
+    assert result["negotiation"]["agreed_price"] == 8
+    assert result["execution"]["invocation_id"] == 200
+    assert client.write_calls == [
+        ("policy_gate", None), ("start_negotiation", None),
+        ("policy_gate", None), ("accept_negotiation", None),
+        ("policy_gate", None), ("invoke_service", None),
+    ]
+
+
+def test_complete_marketplace_workflow_stops_when_policy_or_executable_listing_is_missing(monkeypatch):
+    class DisabledClient(FakeMarketplaceClient):
+        def get_autonomous_policy(self):
+            return {"enabled": False}
+
+    disabled = DisabledClient([])
+    result = _run_as_user(
+        monkeypatch, server.complete_marketplace_workflow, disabled,
+        "writing", {"input_text": "Summarize"}, "workflow-disabled-key",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert result["ok"] is False and "disabled" in result["error"]
+    assert disabled.write_calls == []
+
+    class NonExecutableClient(FakeMarketplaceClient):
+        def get_agent_details(self, agent_id):
+            return {"id": agent_id, "name": "Writing Service", "category": "Writing",
+                    "price": 8, "is_active": True, "execution_available": False}
+
+    not_executable = NonExecutableClient([{
+        "id": 2, "name": "Writing Service", "category": "Writing", "price": 8,
+        "is_active": True, "execution_available": False,
+    }])
+    result = _run_as_user(
+        monkeypatch, server.complete_marketplace_workflow, not_executable,
+        "writing", {"input_text": "Summarize"}, "workflow-not-executable-key",
+        scopes=["marketplace:read", "marketplace:write"],
+    )
+    assert result["ok"] is False and "No active executable listing" in result["error"]
+    assert not_executable.write_calls == []
+
+
 def test_mcp_tool_registry_has_unique_complete_workflow_names():
     names = [tool.name for tool in asyncio.run(server.mcp.list_tools())]
     assert len(names) == len(set(names))
